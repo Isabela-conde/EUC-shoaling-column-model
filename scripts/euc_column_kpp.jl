@@ -2,18 +2,20 @@
 # -----------------------------------------------------------------------------
 # 1-D equatorial column (OceanTurb.jl KPP + LMD94 interior shear mixing) forced
 # like ACCESS-OM2 at 0°, 140°W, used to split warming-induced EUC shoaling into
-#   PGF route    : pressure-gradient profile changes, stratification fixed
-#   mixing route : stratification changes (suppresses momentum mixing), PGF fixed
+#   pgf    : PGF profile SHAPE changes (warm PGF rescaled to the control integral),
+#            stress and stratification fixed
+#   stress : stress and PGF magnitude change (warm τ, warm ∫PGF), shape and
+#            stratification fixed   [the c_d-driven stress change]
+#   strat  : stratification changes (restoring targets, SST, w), PGF and τ fixed
+#   both   : everything from the warm run
 #
 #   dU/dt = PGF(z) - w dU/dz - U/τ_d + d/dz(ν dU/dz),      top flux τ/ρ₀
 #   dT/dt = (T*(z) - T)/τ_T + d/dz(κ dT/dz) + KPP nonlocal,  top flux λ_fb (SST - SST*)/(ρ₀ cp)
-#   dS/dt = (S*(z) - S)/τ_T + ...
 #
-# No restoring on U (that would pin the core). The Rayleigh term -U/τ_d stands in
-# for horizontal advection / meridional divergence; its size is reported.
+# Jet metrics: argmax core depth is unreliable for flat-topped profiles, so the
+# primary metrics are the eastward-flow centroid depth and the half-max band.
 #
-# Inputs: euc_column_inputs_140W.nc from extract_column_inputs.py
-#         (runs "ctrl" and "warm": T, S, u, w, pgf on st_ocean; tau_x, sst scalars)
+# Inputs: inputs/euc_column_inputs_140W.nc from extract_column_inputs.py
 # -----------------------------------------------------------------------------
 
 using OceanTurb
@@ -26,7 +28,6 @@ const KPP = OceanTurb.KPP
 
 # ============================================================================ #
 # 1. LMD94 interior shear-instability mixing, missing from OceanTurb's KPP.
-#    MOM5/ACCESS: ν = ν₀ (1 - (Ri/Ri₀)²)³ for 0 < Ri < Ri₀, ν₀ for Ri < 0, 0 above.
 # ============================================================================ #
 import OceanTurb.KPP: K_KPP, 𝒲_U, 𝒲_T, d
 using OceanTurb.PacanowskiPhilander: local_richardson
@@ -46,20 +47,21 @@ KPP.KT(m::KPP.Model, i) = K_KPP(m.state.h, 𝒲_T(m, i), d(m, i)) + m.parameters
 # 2. Settings
 # ============================================================================ #
 const INPUT  = "inputs/euc_column_inputs_140W.nc"
+const FIGDIR = "figures"
 constants    = Constants(f = 0.0, α = 2.0e-4, β = 8.0e-4, ρ₀ = 1026.0, g = 9.81)
 const cp     = 3991.0
 
 N, H    = 160, 400.0            # 2.5 m cells, 400 m deep
 Δt      = 10minute
 tfinal  = 360day
-τ_d     = 30day                 # Rayleigh drag on U  (sensitivity: 15, 60 day)
+τ_d     = 60day                 # Rayleigh drag on U; sensitivity below
 τ_T     = 20day                 # restoring of T, S toward ACCESS profile
 λ_fb    = 40.0                  # SST feedback, W m⁻² K⁻¹
-use_w   = true                  # include -w dU/dz
+use_w   = true
 kpp_params = KPP.Parameters(KU₀ = 1e-4, KT₀ = 1e-5, KS₀ = 1e-5)   # MOM5 backgrounds
 
 # ============================================================================ #
-# 3. Load ACCESS inputs and interpolate onto the column grid
+# 3. Load ACCESS inputs
 # ============================================================================ #
 function interp1(zq, z, v)                     # z ascending, linear, clamped
     out = similar(zq)
@@ -77,11 +79,11 @@ end
 function load_inputs(fn, zc)
     ds   = NCDataset(fn)
     runs = String.(ds["run"][:])
-    zin  = -Float64.(ds["st_ocean"][:])                 # negative, descending
-    ord  = sortperm(zin)                                # ascending for interp
+    zin  = -Float64.(ds["st_ocean"][:])
+    ord  = sortperm(zin)
     prof = Dict{String, Any}()
     for (ir, r) in enumerate(runs)
-        function get(v)                                   # drop NaN levels, then interpolate
+        function get(v)
             val = Float64.(nomissing(ds[v][:, ir], NaN))[ord]
             ok  = isfinite.(val)
             return interp1(zc, zin[ord][ok], val[ok])
@@ -99,21 +101,46 @@ zf   = grid.zf
 Δz   = H / N
 prof = load_inputs(INPUT, zc)
 for r in ("ctrl", "warm")
-    haskey(prof, r) || error("run \"$r\" missing from $INPUT; it has $(collect(keys(prof))). Re-run extract_column_inputs.py with RUNS = {\"ctrl\": ..., \"warm\": ...}.")
+    haskey(prof, r) || error("run \"$r\" missing from $INPUT; it has $(collect(keys(prof))).")
+end
+mkpath(FIGDIR)
+
+# ============================================================================ #
+# 4. Jet metrics (shared by column output and ACCESS profiles)
+# ============================================================================ #
+function jet_metrics(U::AbstractVector, z::AbstractVector)
+    zq = collect(-300.0:1.0:-1.0)
+    uq = interp1(zq, z, U)
+    k  = argmax(uq);  Umax = uq[k];  z_argmax = zq[k]
+    m  = uq .> 0
+    centroid = any(m) ? sum(zq[m] .* uq[m]) / sum(uq[m]) : NaN
+    half = Umax / 2
+    above = findall(i -> i > k && uq[i] < half, eachindex(uq))      # shallower than core (z larger)
+    below = findall(i -> i < k && uq[i] < half, eachindex(uq))
+    z_hi  = isempty(above) ? zq[end] : zq[first(above)]
+    z_lo  = isempty(below) ? zq[1]   : zq[last(below)]
+    us    = uq[end]
+    cross = findall(i -> i > k && uq[i] <= 0, eachindex(uq))
+    z0    = isempty(cross) ? NaN : zq[first(cross)]
+    return (; Umax, z_argmax, centroid, z_hi, z_lo, thickness = z_hi - z_lo, u_surf = us, z_zero = z0)
 end
 
 # ============================================================================ #
-# 4. One column experiment
+# 5. One column experiment
 # ============================================================================ #
 function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
-                      τ_d = τ_d, τ_T = τ_T, use_w = use_w, tfinal = tfinal, verbose = true)
+                      pgf_scale_to = nothing, τ_d = τ_d, τ_T = τ_T, use_w = use_w,
+                      tfinal = tfinal, verbose = true, label = "")
 
-    pgf  = prof[pgf_run].pgf
-    wz   = use_w ? prof[strat_run].w : zeros(N)        # w belongs to the dynamical state; keep with strat
+    pgf = copy(prof[pgf_run].pgf)
+    if pgf_scale_to !== nothing            # keep the SHAPE of pgf_run, the INTEGRAL of pgf_scale_to
+        pgf .*= sum(prof[pgf_scale_to].pgf) / sum(pgf)
+    end
+    wz   = use_w ? prof[strat_run].w : zeros(N)
     Ttgt = prof[strat_run].T
     Stgt = prof[strat_run].S
     SST★ = prof[strat_run].sst
-    τx   = prof[tau_run].tau                            # negative = easterly in ACCESS
+    τx   = prof[tau_run].tau
 
     function forcing_U(m, i)
         f = pgf[i] - m.solution.U[i] / τ_d
@@ -125,9 +152,7 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     forcing_T(m, i) = (Ttgt[i] - m.solution.T[i]) / τ_T
     forcing_S(m, i) = (Stgt[i] - m.solution.S[i]) / τ_T
 
-    # OceanTurb: positive top flux removes the quantity. Easterly stress (τx < 0 in
-    # ACCESS, eastward-positive) must remove eastward momentum → Qᵘ = -τx/ρ₀ > 0.
-    Qᵘ    = -τx / constants.ρ₀
+    Qᵘ    = -τx / constants.ρ₀                                  # positive top flux removes U
     Qθ(m) = λ_fb * (m.solution.T[N] - SST★) / (constants.ρ₀ * cp)
 
     bcs = KPP.ModelBoundaryConditions(
@@ -139,7 +164,6 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
                       stepper = :BackwardEuler, bcs = bcs,
                       forcing = KPP.Forcing(U = forcing_U, T = forcing_T, S = forcing_S))
 
-    # start from the ACCESS state of the stratification run
     u0 = prof[strat_run].u
     model.solution.U = z -> u0[argmin(abs.(zc .- z))]
     model.solution.V = z -> 0.0
@@ -147,11 +171,12 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     model.solution.S = z -> Stgt[argmin(abs.(zc .- z))]
 
     nsteps = Int(round(tfinal / Δt))
-    t = Float64[]; zcore_t = Float64[]
+    t = Float64[]; cen_t = Float64[]
     for n in 1:nsteps
         run_until!(model, Δt, n * Δt)
         if n % Int(round(1day / Δt)) == 0
-            push!(t, model.clock.time); push!(zcore_t, core_depth(model))
+            U = [model.solution.U[i] for i in 1:N]
+            push!(t, model.clock.time); push!(cen_t, jet_metrics(U, zc).centroid)
         end
     end
 
@@ -160,7 +185,6 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     νf  = [i == 1 || i == N + 1 ? NaN : KPP.KU(model, i) for i in 1:N+1]
     Rif = [i == 1 || i == N + 1 ? NaN : local_richardson(model, i) for i in 1:N+1]
 
-    # momentum budget at cell centres (steady: should sum ≈ 0)
     fric = fill(NaN, N); adv = fill(NaN, N)
     for i in 2:N-1
         fric[i] = (νf[i+1] * (U[i+1] - U[i]) - νf[i] * (U[i] - U[i-1])) / Δz^2
@@ -168,60 +192,74 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     end
     ray = -U ./ τ_d
 
-    zcr, Ucr = core_depth(model; return_speed = true)
-    verbose && @printf("pgf=%-5s strat=%-5s | core %6.1f m  U %5.3f m/s  | ∫PGF %+.2e  ∫Ray %+.2e  τ/ρ %+.2e  (m²/s²)\n",
-                       pgf_run, strat_run, zcr, Ucr, sum(pgf) * Δz, sum(ray) * Δz, τx / constants.ρ₀)
-    return (; U, T, νf, Rif, pgf, fric, adv, ray, zcore = zcr, Ucore = Ucr, t, zcore_t, zc, zf)
-end
-
-# core depth from a 1 m-interpolated profile, searched between 20 and 300 m
-function core_depth(model; return_speed = false)
-    U  = [model.solution.U[i] for i in 1:N]
-    zq = collect(-300.0:1.0:-20.0)
-    uq = interp1(zq, zc, U)
-    k  = argmax(uq)
-    return return_speed ? (zq[k], uq[k]) : zq[k]
+    jm = jet_metrics(U, zc)
+    kc = argmin(abs.(zc .- jm.centroid))
+    ray_frac = abs(ray[kc]) / max(abs(pgf[kc]), 1e-12)
+    verbose && @printf("%-7s | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f  | ∫PGF %+.2e τ/ρ %+.2e  Ray/PGF@centroid %.2f\n",
+                       label, jm.Umax, jm.z_argmax, jm.centroid, jm.z_hi, jm.z_lo, jm.u_surf,
+                       sum(pgf) * Δz, τx / constants.ρ₀, ray_frac)
+    return (; U, T, νf, Rif, pgf, fric, adv, ray, jm, t, cen_t, ray_frac)
 end
 
 # ============================================================================ #
-# 5. Experiments
+# 6. τ_d sensitivity on the control (pick the value, then run the experiments)
 # ============================================================================ #
+println("\n=== τ_d sensitivity (control) ===")
+A_c = jet_metrics(prof["ctrl"].u, zc)
+@printf("ACCESS  | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f\n",
+        A_c.Umax, A_c.z_argmax, A_c.centroid, A_c.z_hi, A_c.z_lo, A_c.u_surf)
+for τd in (30day, 60day, 90day, 180day)
+    run_column(τ_d = τd, label = @sprintf("τ_d %3.0fd", τd / day))
+end
+
+# ============================================================================ #
+# 7. Experiments
+# ============================================================================ #
+println("\n=== experiments (τ_d = $(τ_d / day) d) ===")
 runs = Dict(
-    "ctrl"  => run_column(pgf_run = "ctrl", strat_run = "ctrl"),
-    "pgf"   => run_column(pgf_run = "warm", strat_run = "ctrl"),
-    "strat" => run_column(pgf_run = "ctrl", strat_run = "warm"),
-    "both"  => run_column(pgf_run = "warm", strat_run = "warm"),
+    "ctrl"   => run_column(label = "ctrl"),
+    "pgf"    => run_column(pgf_run = "warm", pgf_scale_to = "ctrl", label = "pgf"),      # shape only
+    "stress" => run_column(pgf_run = "warm", tau_run = "warm", label = "stress"),         # warm τ + warm ∫PGF (shape too)
+    "strat"  => run_column(strat_run = "warm", label = "strat"),
+    "both"   => run_column(pgf_run = "warm", tau_run = "warm", strat_run = "warm", label = "both"),
 )
+# note: "stress" − "pgf" isolates the magnitude (c_d) effect; "pgf" isolates the shape.
 
-# ACCESS core depths for comparison (same algorithm on the ACCESS u profiles)
-access_core(r) = (zq = collect(-300.0:1.0:-20.0); uq = interp1(zq, zc, prof[r].u); zq[argmax(uq)])
-zA_c, zA_w = access_core("ctrl"), access_core("warm")
-
-println("\n=== EUC core depth (m) ===")
-@printf("ACCESS   ctrl %6.1f   warm %6.1f   Δ %+5.1f\n", zA_c, zA_w, zA_w - zA_c)
-for k in ("ctrl", "pgf", "strat", "both")
-    @printf("column   %-5s %6.1f   Δ vs ctrl %+5.1f\n", k, runs[k].zcore, runs[k].zcore - runs["ctrl"].zcore)
+A_w = jet_metrics(prof["warm"].u, zc)
+println("\n=== changes vs control: Δcentroid (m, + = shallower), Δhalf-max top, Δu_surf ===")
+@printf("ACCESS   Δcentroid %+5.1f  Δz_hi %+5.1f  Δu_surf %+.3f\n",
+        A_w.centroid - A_c.centroid, A_w.z_hi - A_c.z_hi, A_w.u_surf - A_c.u_surf)
+c0 = runs["ctrl"].jm
+for k in ("pgf", "stress", "strat", "both")
+    j = runs[k].jm
+    @printf("column %-6s Δcentroid %+5.1f  Δz_hi %+5.1f  Δu_surf %+.3f\n",
+            k, j.centroid - c0.centroid, j.z_hi - c0.z_hi, j.u_surf - c0.u_surf)
 end
-Δp, Δs, Δb = (runs[k].zcore - runs["ctrl"].zcore for k in ("pgf", "strat", "both"))
-@printf("additivity: pgf + strat = %+5.1f  vs  both = %+5.1f\n", Δp + Δs, Δb)
+Δ(k) = runs[k].jm.centroid - c0.centroid
+@printf("additivity: pgf + (stress − pgf) + strat = %+5.1f  vs both = %+5.1f\n",
+        Δ("stress") + Δ("strat"), Δ("both"))
 
 # ============================================================================ #
-# 6. Figure
+# 8. Figures
 # ============================================================================ #
-fig, ax = subplots(1, 4, figsize = (17, 5.5), sharey = true)
-cols = Dict("ctrl" => "k", "pgf" => "C0", "strat" => "C3", "both" => "C2")
+cols = Dict("ctrl" => "k", "pgf" => "C0", "stress" => "C4", "strat" => "C3", "both" => "C2")
+order = ("pgf", "stress", "strat", "both")
+
+fig, ax = subplots(1, 5, figsize = (21, 5.5))
+ax[1].set_ylabel("z (m)")
+for a in ax[1:4]; a.set_ylim(-300, 0); end
 
 # (a) u profiles
-for k in ("ctrl", "pgf", "strat", "both")
+for k in ("ctrl", order...)
     ax[1].plot(runs[k].U, zc, cols[k], label = "column $k")
 end
 ax[1].plot(prof["ctrl"].u, zc, "k--", lw = 1, label = "ACCESS ctrl")
 ax[1].plot(prof["warm"].u, zc, "C2--", lw = 1, label = "ACCESS warm")
-ax[1].axvline(0, color = "0.6", lw = 0.6); ax[1].set_xlabel("u (m/s)"); ax[1].set_ylabel("z (m)")
-ax[1].set_title("zonal velocity"); ax[1].legend(fontsize = 7); ax[1].set_ylim(-300, 0)
+ax[1].axvline(0, color = "0.6", lw = 0.6); ax[1].set_xlabel("u (m/s)")
+ax[1].set_title("zonal velocity"); ax[1].legend(fontsize = 7)
 
-# (b) Δu relative to column control
-for k in ("pgf", "strat", "both")
+# (b) Δu vs column control
+for k in order
     ax[2].plot(runs[k].U .- runs["ctrl"].U, zc, cols[k], label = k)
 end
 ax[2].plot(prof["warm"].u .- prof["ctrl"].u, zc, "k--", lw = 1, label = "ACCESS warm − ctrl")
@@ -235,7 +273,7 @@ end
 ax[3].set_xlabel("ν (m²/s)"); ax[3].set_title("KPP + interior shear ν"); ax[3].legend(fontsize = 7)
 ax[3].set_xlim(1e-5, 1e-1)
 
-# (d) momentum budget, control
+# (d) budget, control
 r = runs["ctrl"]
 ax[4].plot(r.pgf,  zc, "C0", label = "PGF")
 ax[4].plot(r.fric, zc, "C3", label = "∂z(ν ∂z u)")
@@ -245,14 +283,27 @@ ax[4].plot(r.pgf .+ r.fric .+ r.adv .+ r.ray, zc, "k:", label = "sum")
 ax[4].axvline(0, color = "0.6", lw = 0.6); ax[4].set_xlabel("m s⁻²"); ax[4].set_title("budget (control)")
 ax[4].legend(fontsize = 7)
 
-suptitle(@sprintf("1-D KPP column at 0°,140°W — core: ctrl %.0f m, pgf %+.0f, strat %+.0f, both %+.0f  (ACCESS %+.0f m)",
-                  runs["ctrl"].zcore, Δp, Δs, Δb, zA_w - zA_c))
-tight_layout(); savefig("euc_column_kpp.png", dpi = 150); println("saved euc_column_kpp.png")
+# (e) bars: Δcentroid and Δu_surf by route, with ACCESS
+labels = [order..., "ACCESS"]
+dcen = [[Δ(k) for k in order]..., A_w.centroid - A_c.centroid]
+dus  = [[runs[k].jm.u_surf - c0.u_surf for k in order]..., A_w.u_surf - A_c.u_surf]
+x = 1:length(labels)
+ax[5].bar(x .- 0.2, dcen, 0.4, color = "C0", label = "Δ centroid (m, + = up)")
+ax5b = ax[5].twinx()
+ax5b.bar(x .+ 0.2, dus .* 100, 0.4, color = "C3", label = "Δ u_surf (cm/s)")
+ax[5].set_xticks(x); ax[5].set_xticklabels(labels, fontsize = 8)
+ax[5].axhline(0, color = "0.6", lw = 0.6)
+ax[5].set_ylabel("Δ centroid depth (m)", color = "C0"); ax5b.set_ylabel("Δ u_surf (cm/s)", color = "C3")
+ax[5].set_title("by route")
 
-# steady-state check
+suptitle(@sprintf("1-D KPP column at 0°,140°W (τ_d = %.0f d) — Δcentroid: pgf %+.0f, stress %+.0f, strat %+.0f, both %+.0f m   (ACCESS %+.0f m)",
+                  τ_d / day, Δ("pgf"), Δ("stress"), Δ("strat"), Δ("both"), A_w.centroid - A_c.centroid))
+tight_layout(); savefig(joinpath(FIGDIR, "euc_column_kpp.png"), dpi = 150)
+println("saved $(joinpath(FIGDIR, "euc_column_kpp.png"))")
+
 fig2, ax2 = subplots(figsize = (6, 3.5))
-for k in ("ctrl", "pgf", "strat", "both")
-    ax2.plot(runs[k].t ./ day, runs[k].zcore_t, cols[k], label = k)
+for k in ("ctrl", order...)
+    ax2.plot(runs[k].t ./ day, runs[k].cen_t, cols[k], label = k)
 end
-ax2.set_xlabel("day"); ax2.set_ylabel("core depth (m)"); ax2.legend(fontsize = 8)
-tight_layout(); savefig("euc_column_spinup.png", dpi = 150)
+ax2.set_xlabel("day"); ax2.set_ylabel("eastward-flow centroid (m)"); ax2.legend(fontsize = 8)
+tight_layout(); savefig(joinpath(FIGDIR, "euc_column_spinup.png"), dpi = 150)
