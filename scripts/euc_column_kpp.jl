@@ -153,6 +153,25 @@ end
 # ============================================================================ #
 # 5. One column experiment
 # ============================================================================ #
+# Shear S² and buoyancy frequency N² on cell faces (face i sits between cells i-1 and i).
+function shear_strat(U, T, S)
+    S2 = fill(NaN, N + 1); N2 = fill(NaN, N + 1)
+    for i in 2:N
+        S2[i] = ((U[i] - U[i-1]) / Δz)^2
+        N2[i] = constants.g * (constants.α * (T[i] - T[i-1]) - constants.β * (S[i] - S[i-1])) / Δz
+    end
+    return S2, N2
+end
+
+# Means over the shear layer above the jet: from the jet maximum up to the KPP boundary-layer base.
+function shear_layer_means(U, S2f, N2f, Rif, νf, h_kpp)
+    k_core = argmax(U)
+    sel = [i for i in 2:N if zf[i] > zc[k_core] && zf[i] < h_kpp]
+    isempty(sel) && return (; S2 = NaN, N2 = NaN, Ri = NaN, ν = NaN, z_top = h_kpp, z_bot = zc[k_core])
+    m(x) = sum(x[sel]) / length(sel)
+    return (; S2 = m(S2f), N2 = m(N2f), Ri = m(N2f) / m(S2f), ν = m(νf), z_top = h_kpp, z_bot = zc[k_core])
+end
+
 function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
                       pgf_scale_to = nothing, pgf_override = nothing, tau_override = nothing,
                       τ_d = τ_d, τ_T = τ_T, use_w = use_w,
@@ -213,6 +232,8 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     mld   = mld_from_profile(T, S, zc)
     νf  = [i == 1 || i == N + 1 ? NaN : KPP.KU(model, i) for i in 1:N+1]
     Rif = [i == 1 || i == N + 1 ? NaN : local_richardson(model, i) for i in 1:N+1]
+    S2f, N2f = shear_strat(U, T, S)                              # on faces, like νf and Rif
+    sl  = shear_layer_means(U, S2f, N2f, Rif, νf, h_kpp)         # between jet max and KPP h
 
     fric = fill(NaN, N); adv = fill(NaN, N)
     for i in 2:N-1
@@ -227,7 +248,7 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     verbose && @printf("%-7s | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f  | KPP h %5.1f  mld %5.1f  | ∫PGF %+.2e τ/ρ %+.2e  Ray/PGF@centroid %.2f\n",
                        label, jm.Umax, jm.z_argmax, jm.centroid, jm.z_hi, jm.z_lo, jm.u_surf,
                        h_kpp, mld, sum(pgf) * Δz, τx / constants.ρ₀, ray_frac)
-    return (; U, T, S, νf, Rif, pgf, fric, adv, ray, jm, t, cen_t, ray_frac, h_kpp, mld)
+    return (; U, T, S, νf, Rif, S2f, N2f, sl, pgf, fric, adv, ray, jm, t, cen_t, ray_frac, h_kpp, mld)
 end
 
 # ============================================================================ #
@@ -361,3 +382,55 @@ ax3[2].plot(ΔPGF_peng, zc, "C0", label = "pycnocline (residual)")
 ax3[2].axvline(0, color = "0.6", lw = 0.6); ax3[2].set_xlabel("ΔPGF (m s⁻²)"); ax3[2].legend(fontsize = 8)
 suptitle("Zonal PGF at 0°,140°W and its decomposition")
 tight_layout(); savefig(joinpath(FIGDIR, "euc_column_pgf_split.png"), dpi = 150)
+
+# ============================================================================ #
+# 9. Shear layer above the jet: does the shear rise with the stratification?
+#    Expectation: S² and N² both rise, Ri stays near critical, ν is maintained
+#    (shifted up with the core) rather than switched off.
+# ============================================================================ #
+S2_A = Dict(); N2_A = Dict()
+for r in ("ctrl", "warm")
+    S2_A[r], N2_A[r] = shear_strat(prof[r].u, prof[r].T, prof[r].S)
+end
+
+println("\n=== shear layer above the jet (jet max → KPP h): layer means ===")
+@printf("%-8s %14s %10s %10s %10s %10s\n", "run", "layer (m)", "S² ×1e-4", "N² ×1e-4", "Ri", "ν ×1e-3")
+for k in ("ctrl", order...)
+    sl = runs[k].sl
+    @printf("%-8s %6.0f → %5.0f %10.2f %10.2f %10.2f %10.2f\n", k, sl.z_bot, sl.z_top,
+            sl.S2 * 1e4, sl.N2 * 1e4, sl.Ri, sl.ν * 1e3)
+end
+c_sl = runs["ctrl"].sl
+println("fractional change vs ctrl:")
+for k in order
+    sl = runs[k].sl
+    @printf("%-8s ΔS² %+5.0f%%  ΔN² %+5.0f%%  ΔRi %+5.0f%%  Δν %+5.0f%%\n", k,
+            100(sl.S2 / c_sl.S2 - 1), 100(sl.N2 / c_sl.N2 - 1), 100(sl.Ri / c_sl.Ri - 1), 100(sl.ν / c_sl.ν - 1))
+end
+
+fig4, ax4 = subplots(1, 4, figsize = (17, 5.5), sharey = true)
+ax4[1].set_ylabel("z (m)"); ax4[1].set_ylim(-200, 0)
+show4 = ("ctrl", "strat", "peng", "both")
+for k in show4
+    lab = k == "ctrl" ? "ctrl" : route_name[k]
+    ax4[1].plot(runs[k].U, zc, cols[k], label = lab)
+    ax4[2].plot(runs[k].N2f .* 1e4, zf, cols[k], label = lab)
+    ax4[2].plot(runs[k].S2f .* 1e4, zf, cols[k], ls = ":", lw = 1)
+    ax4[3].plot(runs[k].Rif, zf, cols[k], label = lab)
+    ax4[4].semilogx(runs[k].νf, zf, cols[k], label = lab)
+    ax4[1].axhline(runs[k].h_kpp, color = cols[k], lw = 0.6, ls = "--")
+end
+ax4[1].plot(prof["ctrl"].u, zc, "k--", lw = 1, label = "ACCESS ctrl")
+ax4[1].plot(prof["warm"].u, zc, "C2--", lw = 1, label = "ACCESS warm")
+ax4[2].plot(N2_A["ctrl"] .* 1e4, zf, "k--", lw = 1); ax4[2].plot(N2_A["warm"] .* 1e4, zf, "C2--", lw = 1)
+ax4[2].plot(S2_A["ctrl"] .* 1e4, zf, "k:", lw = 1);  ax4[2].plot(S2_A["warm"] .* 1e4, zf, "C2:", lw = 1)
+ax4[1].axvline(0, color = "0.6", lw = 0.6); ax4[1].set_xlabel("u (m/s)"); ax4[1].set_title("zonal velocity (dashed: KPP h)")
+ax4[2].set_xlabel("×1e-4 s⁻²"); ax4[2].set_title("N² (solid) and S² (dotted); ACCESS dashed/dotted")
+ax4[3].axvline(0.25, color = "0.6", lw = 0.6); ax4[3].set_xlim(0, 2); ax4[3].set_xlabel("Ri"); ax4[3].set_title("Richardson number (grey: ¼)")
+ax4[4].set_xlim(1e-5, 1e-1); ax4[4].set_xlabel("ν (m²/s)"); ax4[4].set_title("KPP + interior shear ν")
+ax4[1].legend(fontsize = 7); ax4[3].legend(fontsize = 7)
+suptitle(@sprintf("Shear layer above the jet — strat run: ΔS² %+.0f%%, ΔN² %+.0f%%, ΔRi %+.0f%%, Δν %+.0f%%",
+                  100(runs["strat"].sl.S2 / c_sl.S2 - 1), 100(runs["strat"].sl.N2 / c_sl.N2 - 1),
+                  100(runs["strat"].sl.Ri / c_sl.Ri - 1), 100(runs["strat"].sl.ν / c_sl.ν - 1)))
+tight_layout(); savefig(joinpath(FIGDIR, "euc_column_shear_layer.png"), dpi = 150)
+println("saved $(joinpath(FIGDIR, "euc_column_shear_layer.png"))")
