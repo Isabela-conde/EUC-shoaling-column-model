@@ -2,11 +2,11 @@
 # -----------------------------------------------------------------------------
 # 1-D equatorial column (OceanTurb.jl KPP + LMD94 interior shear mixing) forced
 # like ACCESS-OM2 at 0°, 140°W, used to split warming-induced EUC shoaling into
-#   pgf    : PGF profile SHAPE changes (warm PGF rescaled to the control integral),
-#            stress and stratification fixed
-#   stress : stress and PGF magnitude change (warm τ, warm ∫PGF), shape and
-#            stratification fixed   [the c_d-driven stress change]
-#   strat  : stratification changes (restoring targets, SST, w), PGF and τ fixed
+#   pgf    : "pressure gradient + stress" route — warm PGF(z) with the warm τ that
+#            balances it; stratification fixed.  (Shape vs magnitude of the PGF
+#            change is not separable from these inputs; an optional rescaled-shape
+#            run is kept behind RUN_SHAPE_TEST = true.)
+#   strat  : "stratification" route — warm T, S, SST, w targets; PGF and τ fixed
 #   both   : everything from the warm run
 #
 #   dU/dt = PGF(z) - w dU/dz - U/τ_d + d/dz(ν dU/dz),      top flux τ/ρ₀
@@ -53,11 +53,12 @@ const cp     = 3991.0
 
 N, H    = 160, 400.0            # 2.5 m cells, 400 m deep
 Δt      = 10minute
-tfinal  = 360day
+tfinal  = 540day
 τ_d     = 60day                 # Rayleigh drag on U; sensitivity below
 τ_T     = 20day                 # restoring of T, S toward ACCESS profile
 λ_fb    = 40.0                  # SST feedback, W m⁻² K⁻¹
 use_w   = true
+RUN_SHAPE_TEST = false        # optional: warm PGF shape rescaled to the control integral
 kpp_params = KPP.Parameters(KU₀ = 1e-4, KT₀ = 1e-5, KS₀ = 1e-5)   # MOM5 backgrounds
 
 # ============================================================================ #
@@ -125,6 +126,15 @@ function jet_metrics(U::AbstractVector, z::AbstractVector)
     return (; Umax, z_argmax, centroid, z_hi, z_lo, thickness = z_hi - z_lo, u_surf = us, z_zero = z0)
 end
 
+# Mixed-layer depth from a T,S profile: first depth where the buoyancy deficit
+# relative to the top cell exceeds Δb_crit (linear EOS, same α, β as the model).
+function mld_from_profile(T, S, z; Δb_crit = 3e-4)
+    g, α, β = constants.g, constants.α, constants.β
+    b = g .* (α .* T .- β .* S)
+    k = findlast(i -> b[end] - b[i] < Δb_crit, eachindex(z))   # z ascending, surface = end
+    return k === nothing ? NaN : (k == 1 ? z[1] : z[k])
+end
+
 # ============================================================================ #
 # 5. One column experiment
 # ============================================================================ #
@@ -182,6 +192,9 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
 
     U   = [model.solution.U[i] for i in 1:N]
     T   = [model.solution.T[i] for i in 1:N]
+    S   = [model.solution.S[i] for i in 1:N]
+    h_kpp = -model.state.h                                      # KPP boundary-layer depth (m, negative)
+    mld   = mld_from_profile(T, S, zc)
     νf  = [i == 1 || i == N + 1 ? NaN : KPP.KU(model, i) for i in 1:N+1]
     Rif = [i == 1 || i == N + 1 ? NaN : local_richardson(model, i) for i in 1:N+1]
 
@@ -195,10 +208,10 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     jm = jet_metrics(U, zc)
     kc = argmin(abs.(zc .- jm.centroid))
     ray_frac = abs(ray[kc]) / max(abs(pgf[kc]), 1e-12)
-    verbose && @printf("%-7s | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f  | ∫PGF %+.2e τ/ρ %+.2e  Ray/PGF@centroid %.2f\n",
+    verbose && @printf("%-7s | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f  | KPP h %5.1f  mld %5.1f  | ∫PGF %+.2e τ/ρ %+.2e  Ray/PGF@centroid %.2f\n",
                        label, jm.Umax, jm.z_argmax, jm.centroid, jm.z_hi, jm.z_lo, jm.u_surf,
-                       sum(pgf) * Δz, τx / constants.ρ₀, ray_frac)
-    return (; U, T, νf, Rif, pgf, fric, adv, ray, jm, t, cen_t, ray_frac)
+                       h_kpp, mld, sum(pgf) * Δz, τx / constants.ρ₀, ray_frac)
+    return (; U, T, S, νf, Rif, pgf, fric, adv, ray, jm, t, cen_t, ray_frac, h_kpp, mld)
 end
 
 # ============================================================================ #
@@ -206,8 +219,9 @@ end
 # ============================================================================ #
 println("\n=== τ_d sensitivity (control) ===")
 A_c = jet_metrics(prof["ctrl"].u, zc)
-@printf("ACCESS  | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f\n",
-        A_c.Umax, A_c.z_argmax, A_c.centroid, A_c.z_hi, A_c.z_lo, A_c.u_surf)
+mld_A = Dict(r => mld_from_profile(prof[r].T, prof[r].S, zc) for r in ("ctrl", "warm"))
+@printf("ACCESS  | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f  | mld(Δb=3e-4) ctrl %5.1f  warm %5.1f\n",
+        A_c.Umax, A_c.z_argmax, A_c.centroid, A_c.z_hi, A_c.z_lo, A_c.u_surf, mld_A["ctrl"], mld_A["warm"])
 for τd in (30day, 60day, 90day, 180day)
     run_column(τ_d = τd, label = @sprintf("τ_d %3.0fd", τd / day))
 end
@@ -217,33 +231,36 @@ end
 # ============================================================================ #
 println("\n=== experiments (τ_d = $(τ_d / day) d) ===")
 runs = Dict(
-    "ctrl"   => run_column(label = "ctrl"),
-    "pgf"    => run_column(pgf_run = "warm", pgf_scale_to = "ctrl", label = "pgf"),      # shape only
-    "stress" => run_column(pgf_run = "warm", tau_run = "warm", label = "stress"),         # warm τ + warm ∫PGF (shape too)
-    "strat"  => run_column(strat_run = "warm", label = "strat"),
-    "both"   => run_column(pgf_run = "warm", tau_run = "warm", strat_run = "warm", label = "both"),
+    "ctrl"  => run_column(label = "ctrl"),
+    "pgf"   => run_column(pgf_run = "warm", tau_run = "warm", label = "pgf"),    # pressure gradient + stress
+    "strat" => run_column(strat_run = "warm", label = "strat"),                  # stratification
+    "both"  => run_column(pgf_run = "warm", tau_run = "warm", strat_run = "warm", label = "both"),
 )
-# note: "stress" − "pgf" isolates the magnitude (c_d) effect; "pgf" isolates the shape.
+if RUN_SHAPE_TEST
+    runs["pgf_shape"] = run_column(pgf_run = "warm", pgf_scale_to = "ctrl", label = "pgfshp")
+end
 
 A_w = jet_metrics(prof["warm"].u, zc)
-println("\n=== changes vs control: Δcentroid (m, + = shallower), Δhalf-max top, Δu_surf ===")
-@printf("ACCESS   Δcentroid %+5.1f  Δz_hi %+5.1f  Δu_surf %+.3f\n",
-        A_w.centroid - A_c.centroid, A_w.z_hi - A_c.z_hi, A_w.u_surf - A_c.u_surf)
+println("\n=== changes vs control: Δcentroid (m, + = shallower), Δhalf-max top, Δu_surf, boundary layer ===")
+@printf("ACCESS   Δcentroid %+5.1f  Δz_hi %+5.1f  Δu_surf %+.3f   mld ctrl %5.1f → warm %5.1f\n",
+        A_w.centroid - A_c.centroid, A_w.z_hi - A_c.z_hi, A_w.u_surf - A_c.u_surf, mld_A["ctrl"], mld_A["warm"])
 c0 = runs["ctrl"].jm
-for k in ("pgf", "stress", "strat", "both")
+for k in ("pgf", "strat", "both")
     j = runs[k].jm
-    @printf("column %-6s Δcentroid %+5.1f  Δz_hi %+5.1f  Δu_surf %+.3f\n",
-            k, j.centroid - c0.centroid, j.z_hi - c0.z_hi, j.u_surf - c0.u_surf)
+    @printf("column %-6s Δcentroid %+5.1f  Δz_hi %+5.1f  Δu_surf %+.3f   KPP h %5.1f  mld %5.1f\n",
+            k, j.centroid - c0.centroid, j.z_hi - c0.z_hi, j.u_surf - c0.u_surf, runs[k].h_kpp, runs[k].mld)
 end
 Δ(k) = runs[k].jm.centroid - c0.centroid
-@printf("additivity: pgf + (stress − pgf) + strat = %+5.1f  vs both = %+5.1f\n",
-        Δ("stress") + Δ("strat"), Δ("both"))
+@printf("additivity: pgf + strat = %+5.1f  vs both = %+5.1f\n", Δ("pgf") + Δ("strat"), Δ("both"))
+@printf("control: KPP h %5.1f m, column mld %5.1f m, ACCESS mld %5.1f m (same Δb criterion)\n",
+        runs["ctrl"].h_kpp, runs["ctrl"].mld, mld_A["ctrl"])
 
 # ============================================================================ #
 # 8. Figures
 # ============================================================================ #
-cols = Dict("ctrl" => "k", "pgf" => "C0", "stress" => "C4", "strat" => "C3", "both" => "C2")
-order = ("pgf", "stress", "strat", "both")
+cols = Dict("ctrl" => "k", "pgf" => "C0", "strat" => "C3", "both" => "C2")
+order = ("pgf", "strat", "both")
+route_name = Dict("pgf" => "PGF + stress", "strat" => "stratification", "both" => "both")
 
 fig, ax = subplots(1, 5, figsize = (21, 5.5))
 ax[1].set_ylabel("z (m)")
@@ -260,7 +277,7 @@ ax[1].set_title("zonal velocity"); ax[1].legend(fontsize = 7)
 
 # (b) Δu vs column control
 for k in order
-    ax[2].plot(runs[k].U .- runs["ctrl"].U, zc, cols[k], label = k)
+    ax[2].plot(runs[k].U .- runs["ctrl"].U, zc, cols[k], label = route_name[k])
 end
 ax[2].plot(prof["warm"].u .- prof["ctrl"].u, zc, "k--", lw = 1, label = "ACCESS warm − ctrl")
 ax[2].axvline(0, color = "0.6", lw = 0.6); ax[2].set_xlabel("Δu (m/s)"); ax[2].set_title("Δu vs control")
@@ -269,7 +286,9 @@ ax[2].legend(fontsize = 7)
 # (c) viscosity
 for k in ("ctrl", "strat")
     ax[3].semilogx(runs[k].νf, zf, cols[k], label = k)
+    ax[3].axhline(runs[k].h_kpp, color = cols[k], ls = ":", lw = 0.8)
 end
+ax[3].axhline(mld_A["ctrl"], color = "k", ls = "--", lw = 0.8, label = "ACCESS mld (ctrl)")
 ax[3].set_xlabel("ν (m²/s)"); ax[3].set_title("KPP + interior shear ν"); ax[3].legend(fontsize = 7)
 ax[3].set_xlim(1e-5, 1e-1)
 
@@ -284,7 +303,7 @@ ax[4].axvline(0, color = "0.6", lw = 0.6); ax[4].set_xlabel("m s⁻²"); ax[4].s
 ax[4].legend(fontsize = 7)
 
 # (e) bars: Δcentroid and Δu_surf by route, with ACCESS
-labels = [order..., "ACCESS"]
+labels = [[route_name[k] for k in order]..., "ACCESS"]
 dcen = [[Δ(k) for k in order]..., A_w.centroid - A_c.centroid]
 dus  = [[runs[k].jm.u_surf - c0.u_surf for k in order]..., A_w.u_surf - A_c.u_surf]
 x = 1:length(labels)
@@ -296,14 +315,14 @@ ax[5].axhline(0, color = "0.6", lw = 0.6)
 ax[5].set_ylabel("Δ centroid depth (m)", color = "C0"); ax5b.set_ylabel("Δ u_surf (cm/s)", color = "C3")
 ax[5].set_title("by route")
 
-suptitle(@sprintf("1-D KPP column at 0°,140°W (τ_d = %.0f d) — Δcentroid: pgf %+.0f, stress %+.0f, strat %+.0f, both %+.0f m   (ACCESS %+.0f m)",
-                  τ_d / day, Δ("pgf"), Δ("stress"), Δ("strat"), Δ("both"), A_w.centroid - A_c.centroid))
+suptitle(@sprintf("1-D KPP column at 0°,140°W (τ_d = %.0f d, %.0f d) — Δcentroid: PGF+stress %+.0f, stratification %+.0f, both %+.0f m   (ACCESS %+.0f m)",
+                  τ_d / day, tfinal / day, Δ("pgf"), Δ("strat"), Δ("both"), A_w.centroid - A_c.centroid))
 tight_layout(); savefig(joinpath(FIGDIR, "euc_column_kpp.png"), dpi = 150)
 println("saved $(joinpath(FIGDIR, "euc_column_kpp.png"))")
 
 fig2, ax2 = subplots(figsize = (6, 3.5))
 for k in ("ctrl", order...)
-    ax2.plot(runs[k].t ./ day, runs[k].cen_t, cols[k], label = k)
+    ax2.plot(runs[k].t ./ day, runs[k].cen_t, cols[k], label = k == "ctrl" ? "ctrl" : route_name[k])
 end
 ax2.set_xlabel("day"); ax2.set_ylabel("eastward-flow centroid (m)"); ax2.legend(fontsize = 8)
 tight_layout(); savefig(joinpath(FIGDIR, "euc_column_spinup.png"), dpi = 150)
