@@ -304,7 +304,11 @@ end
 # ============================================================================ #
 cols = Dict("ctrl" => "k", "peng" => "C0", "cd" => "C4", "strat" => "C3", "both" => "C2", "pgfstr" => "0.6")
 order = ("peng", "cd", "strat", "both")
-route_name = Dict("peng" => "pycnocline PGF", "cd" => "drag-coef. stress", "strat" => "stratification", "both" => "both")
+route_name = Dict("peng" => "pycnocline PGF (warm PGF − stress part; ctrl τ, ctrl strat.)",
+                  "cd"   => "drag-coef. stress (warm τ + its PGF; ctrl strat.)",
+                  "strat" => "stratification (warm T, S, w restoring; ctrl PGF, ctrl τ)",
+                  "both" => "all warm forcing (warm PGF + warm τ + warm strat.)",
+                  "stratwc" => "stratification with ctrl w")
 
 fig, ax = subplots(1, 5, figsize = (21, 5.5))
 ax[1].set_ylabel("z (m)")
@@ -347,7 +351,8 @@ ax[4].axvline(0, color = "0.6", lw = 0.6); ax[4].set_xlabel("m s⁻²"); ax[4].s
 ax[4].legend(fontsize = 7)
 
 # (e) bars: Δcentroid and Δu_surf by route, with ACCESS
-labels = [[route_name[k] for k in order]..., "ACCESS"]
+route_short = Dict("peng" => "pycnocline\nPGF", "cd" => "c_d stress\n(+ its PGF)", "strat" => "stratification", "both" => "all warm\nforcing")
+labels = [[route_short[k] for k in order]..., "ACCESS\nwarm − ctrl"]
 dcen = [[Δ(k) for k in order]..., A_w.centroid - A_c.centroid]
 dus  = [[runs[k].jm.u_surf - c0.u_surf for k in order]..., A_w.u_surf - A_c.u_surf]
 x = 1:length(labels)
@@ -460,7 +465,9 @@ function ladder(U, T, S, h)
 end
 function ladder_change(a, c)       # a = run, c = control
     (; du_core = a.u_core - c.u_core, dS = -c.L * (a.S̄ - c.S̄), dL = -c.S̄ * (a.L - c.L),
-       cross = -(a.S̄ - c.S̄) * (a.L - c.L), dD = -(a.D - c.D), du_surf = a.u_surf - c.u_surf)
+       cross = -(a.S̄ - c.S̄) * (a.L - c.L), dD = -(a.D - c.D), du_surf = a.u_surf - c.u_surf,
+       dDrop = -((a.u_core - a.u_h) - (c.u_core - c.u_h)),      # −Δ(drop across shear layer) = −Δ(S̄L); robust to the S̄/L split
+       du_h = a.u_h - c.u_h)
 end
 
 lad = Dict(k => ladder(runs[k].U, runs[k].T, runs[k].S, runs[k].h_kpp) for k in keys(runs))
@@ -511,18 +518,24 @@ for k in ("peng", "cd", "strat", "stratwc", "both")
             100(b.u_ml - bc.u_ml), 100(runs[k].jm.u_surf - runs["ctrl"].jm.u_surf))
 end
 
-# figure: ladder decomposition bars
-fig5, ax5 = subplots(figsize = (9, 4))
+# figure: ladder, robust form.  Δu_surf = Δu_core − Δ(drop across shear layer, h → core) − Δ(drop across mixed layer)
+# (the split of the shear-layer drop into "sharper" (ΔS̄) and "thinner" (ΔL) is argmax-sensitive on a flat-topped jet; table only)
+fig5, ax5 = subplots(figsize = (11, 4.5))
 names5 = ("ACCESS", "peng", "cd", "strat", "stratwc", "both")
-terms5 = [("Δu_core", :du_core, "C0"), ("−L·ΔS̄ (sharper shear layer)", :dS, "C3"),
-          ("−S̄·ΔL (thinner layer: intrusion)", :dL, "C2"), ("cross", :cross, "0.7"), ("−ΔD (mixed-layer shear)", :dD, "C1")]
-w5 = 0.15
+xlab5  = ("ACCESS\nwarm − ctrl", "pycnocline PGF\n(ctrl τ, strat.)", "c_d stress\n(+ its PGF)", "stratification\n(warm T,S,w)",
+          "stratification\n(ctrl w)", "all warm forcing\n(PGF + τ + strat.)")
+terms5 = [("Δu_core (jet maximum)", :du_core, "C0"),
+          ("−Δ(u_core − u_h): drop across shear layer, h → core", :dDrop, "C3"),
+          ("−Δ(u_h − u_surf): drop across mixed layer", :dD, "C1")]
+w5 = 0.25
 for (j, (lab, key, col)) in enumerate(terms5)
-    ax5.bar((1:length(names5)) .+ (j - 3) * w5, [100 * getfield(chg[n], key) for n in names5], w5, color = col, label = lab)
+    ax5.bar((1:length(names5)) .+ (j - 2) * w5, [100 * getfield(chg[n], key) for n in names5], w5, color = col, label = lab)
 end
-ax5.plot(1:length(names5), [100 * chg[n].du_surf for n in names5], "k_", ms = 18, mew = 2, label = "Δu_surf")
-ax5.set_xticks(1:length(names5)); ax5.set_xticklabels(names5); ax5.axhline(0, color = "0.6", lw = 0.6)
-ax5.set_ylabel("cm/s (+ = eastward)"); ax5.set_title("Δu_surf = Δu_core − L·ΔS̄ − S̄·ΔL − ΔS̄·ΔL − ΔD")
-ax5.legend(fontsize = 7, ncol = 2)
+ax5.plot((1:length(names5)) .- 0.125, [100 * chg[n].du_h for n in names5], "k", ls = "none", marker = "o", mfc = "none", ms = 8, label = "Δu_h (mixed-layer base)")
+ax5.plot((1:length(names5)) .+ 0.125, [100 * chg[n].du_surf for n in names5], "k_", ms = 18, mew = 2, label = "Δu_surf")
+ax5.set_xticks(1:length(names5)); ax5.set_xticklabels(xlab5, fontsize = 8); ax5.axhline(0, color = "0.6", lw = 0.6)
+ax5.set_ylabel("cm/s (+ = eastward)")
+ax5.set_title("Δu_surf = Δu_core − Δ(drop h→core) − Δ(drop in mixed layer);  column runs vs ACCESS at 0°,140°W")
+ax5.legend(fontsize = 7, loc = "lower left")
 tight_layout(); savefig(joinpath(FIGDIR, "euc_column_ladder.png"), dpi = 150)
 println("saved $(joinpath(FIGDIR, "euc_column_ladder.png"))")
