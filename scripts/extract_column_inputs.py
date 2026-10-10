@@ -55,8 +55,14 @@ def column_inputs(ds, years):
     T  = _band(pt, "yt_ocean", "xt_ocean", lon=LON_EVAL).sel(st_ocean=slice(0, ZMAX)).mean("time")
     S  = _band(sp, "yt_ocean", "xt_ocean", lon=LON_EVAL).sel(st_ocean=slice(0, ZMAX)).mean("time")
     u  = _band(u_, "yu_ocean", "xu_ocean", lon=LON_EVAL).sel(st_ocean=slice(0, ZMAX)).mean("time")
-    w  = _band(w_, "yt_ocean", "xt_ocean", lon=LON_EVAL).mean("time")              # may be on sw_ocean
-    w  = w.interp(sw_ocean=zt.values).rename({"sw_ocean": "st_ocean"}) if "sw_ocean" in w.dims else w.sel(st_ocean=slice(0, ZMAX))
+    # w lives on w-levels (sw_ocean, or sw_ocean relabelled as st_ocean with different
+    # values). Interpolate it onto the T levels so every variable shares one st_ocean,
+    # otherwise xarray outer-joins the two level sets and interleaves NaNs.
+    w  = _band(w_, "yt_ocean", "xt_ocean", lon=LON_EVAL).mean("time")
+    if "sw_ocean" in w.dims:
+        w = w.rename({"sw_ocean": "st_ocean"})
+    w  = w.interp(st_ocean=T["st_ocean"].values)
+    u  = u.interp(st_ocean=T["st_ocean"].values)        # u is on the same levels; harmless
 
     # ---- pressure gradient force: p/rho0 = g*eta + (g/rho0) * int_z^0 (rho - rho0) dz' --------
     rho = _band(rho_, "yt_ocean", "xt_ocean", lonslice=PGF_LON).sel(st_ocean=slice(0, ZMAX)).mean("time")
@@ -68,12 +74,14 @@ def column_inputs(ds, years):
     xm = np.deg2rad(p_over_rho["xt_ocean"].values) * 6.371e6                        # metres along equator
     slope = np.polyfit(xm, p_over_rho.transpose("st_ocean", "xt_ocean").values.T, 1)[0]   # d(p/rho)/dx per level
     pgf = xr.DataArray(-slope, coords={"st_ocean": p_over_rho["st_ocean"]}, dims="st_ocean")
+    pgf = pgf.interp(st_ocean=T["st_ocean"].values)
 
     tau  = float(_band(taux_, "yu_ocean", "xu_ocean", lon=LON_EVAL).mean("time"))
     qnet = float(_band(qnet_, "yt_ocean", "xt_ocean", lon=LON_EVAL).mean("time"))
     sst  = float(T.isel(st_ocean=0))
 
-    out = xr.Dataset(dict(T=T, S=S, u=u, w=w, pgf=pgf))
+    out = xr.Dataset(dict(T=T, S=S, u=u, w=w, pgf=pgf)).reset_coords(drop=True)
+    assert int(out.to_array().isnull().sum()) == 0, "NaNs in column inputs: check level alignment"
     out = out.assign(tau_x=tau, q_net=qnet, sst=sst)
     return out
 

@@ -45,7 +45,7 @@ KPP.KT(m::KPP.Model, i) = K_KPP(m.state.h, 𝒲_T(m, i), d(m, i)) + m.parameters
 # ============================================================================ #
 # 2. Settings
 # ============================================================================ #
-const INPUT  = "euc_column_inputs_140W.nc"
+const INPUT  = "inputs/euc_column_inputs_140W.nc"
 constants    = Constants(f = 0.0, α = 2.0e-4, β = 8.0e-4, ρ₀ = 1026.0, g = 9.81)
 const cp     = 3991.0
 
@@ -81,7 +81,11 @@ function load_inputs(fn, zc)
     ord  = sortperm(zin)                                # ascending for interp
     prof = Dict{String, Any}()
     for (ir, r) in enumerate(runs)
-        get(v) = interp1(zc, zin[ord], Float64.(nomissing(ds[v][:, ir], NaN))[ord])
+        function get(v)                                   # drop NaN levels, then interpolate
+            val = Float64.(nomissing(ds[v][:, ir], NaN))[ord]
+            ok  = isfinite.(val)
+            return interp1(zc, zin[ord][ok], val[ok])
+        end
         prof[r] = (T = get("T"), S = get("S"), u = get("u"), w = get("w"), pgf = get("pgf"),
                    tau = Float64(ds["tau_x"][ir]), sst = Float64(ds["sst"][ir]))
     end
@@ -94,6 +98,9 @@ zc   = grid.zc
 zf   = grid.zf
 Δz   = H / N
 prof = load_inputs(INPUT, zc)
+for r in ("ctrl", "warm")
+    haskey(prof, r) || error("run \"$r\" missing from $INPUT; it has $(collect(keys(prof))). Re-run extract_column_inputs.py with RUNS = {\"ctrl\": ..., \"warm\": ...}.")
+end
 
 # ============================================================================ #
 # 4. One column experiment
