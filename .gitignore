@@ -1,0 +1,7 @@
+inputs/*.nc
+*.png
+*.pdf
+.DS_Store
+Manifest.toml
+__pycache__/
+*.pyc

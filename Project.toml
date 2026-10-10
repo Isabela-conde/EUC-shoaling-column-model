@@ -1,0 +1,6 @@
+name = "EUCShoalingColumn"
+
+[deps]
+NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
+OceanTurb = "0d5f0d58-7f2e-5c45-be6b-8d8bb5f7fd4d"
+PyPlot = "d330b81b-6aea-500a-939a-2ce795aea3ee"
