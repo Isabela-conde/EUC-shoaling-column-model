@@ -174,14 +174,14 @@ end
 
 function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
                       pgf_scale_to = nothing, pgf_override = nothing, tau_override = nothing,
-                      τ_d = τ_d, τ_T = τ_T, use_w = use_w,
+                      τ_d = τ_d, τ_T = τ_T, use_w = use_w, w_run = nothing,
                       tfinal = tfinal, verbose = true, label = "")
 
     pgf = pgf_override === nothing ? copy(prof[pgf_run].pgf) : copy(pgf_override)
     if pgf_scale_to !== nothing            # keep the SHAPE of pgf_run, the INTEGRAL of pgf_scale_to
         pgf .*= sum(prof[pgf_scale_to].pgf) / sum(pgf)
     end
-    wz   = use_w ? prof[strat_run].w : zeros(N)
+    wz   = use_w ? prof[w_run === nothing ? strat_run : w_run].w : zeros(N)   # upwelling from w_run (default: strat_run)
     Ttgt = prof[strat_run].T
     Stgt = prof[strat_run].S
     SST★ = prof[strat_run].sst
@@ -248,7 +248,7 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", tau_run = "ctrl",
     verbose && @printf("%-7s | Umax %5.3f  argmax %6.1f  centroid %6.1f  half-max %4.0f–%4.0f  u_surf %+.3f  | KPP h %5.1f  mld %5.1f  | ∫PGF %+.2e τ/ρ %+.2e  Ray/PGF@centroid %.2f\n",
                        label, jm.Umax, jm.z_argmax, jm.centroid, jm.z_hi, jm.z_lo, jm.u_surf,
                        h_kpp, mld, sum(pgf) * Δz, τx / constants.ρ₀, ray_frac)
-    return (; U, T, S, νf, Rif, S2f, N2f, sl, pgf, fric, adv, ray, jm, t, cen_t, ray_frac, h_kpp, mld)
+    return (; U, T, S, νf, Rif, S2f, N2f, sl, pgf, fric, adv, ray, jm, t, cen_t, ray_frac, h_kpp, mld, τx, wz)
 end
 
 # ============================================================================ #
@@ -274,6 +274,7 @@ runs = Dict(
     "strat"  => run_column(strat_run = "warm", label = "strat"),                                # stratification
     "pgfstr" => run_column(pgf_run = "warm", tau_run = "warm", label = "pgfstr"),               # = peng + cd (check)
     "both"   => run_column(pgf_run = "warm", tau_run = "warm", strat_run = "warm", label = "both"),
+    "stratwc" => run_column(strat_run = "warm", w_run = "ctrl", label = "stratwc"),              # stratification, control w
 )
 if RUN_SHAPE_TEST
     runs["pgf_shape"] = run_column(pgf_run = "warm", pgf_scale_to = "ctrl", label = "pgfshp")
@@ -408,17 +409,15 @@ for k in order
             100(sl.S2 / c_sl.S2 - 1), 100(sl.N2 / c_sl.N2 - 1), 100(sl.Ri / c_sl.Ri - 1), 100(sl.ν / c_sl.ν - 1))
 end
 
-fig4, ax4 = subplots(1, 4, figsize = (17, 5.5), sharey = true)
+fig4, ax4 = subplots(1, 3, figsize = (13, 5.5), sharey = true)
 ax4[1].set_ylabel("z (m)"); ax4[1].set_ylim(-200, 0)
-show4 = ("ctrl", "strat", "peng", "both")
-for k in show4
+for k in ("ctrl", "strat", "both")
     lab = k == "ctrl" ? "ctrl" : route_name[k]
     ax4[1].plot(runs[k].U, zc, cols[k], label = lab)
+    ax4[1].axhline(runs[k].h_kpp, color = cols[k], lw = 0.6, ls = "--")
     ax4[2].plot(runs[k].N2f .* 1e4, zf, cols[k], label = lab)
     ax4[2].plot(runs[k].S2f .* 1e4, zf, cols[k], ls = ":", lw = 1)
-    ax4[3].plot(runs[k].Rif, zf, cols[k], label = lab)
-    ax4[4].semilogx(runs[k].νf, zf, cols[k], label = lab)
-    ax4[1].axhline(runs[k].h_kpp, color = cols[k], lw = 0.6, ls = "--")
+    ax4[3].semilogx(runs[k].νf, zf, cols[k], label = lab)
 end
 ax4[1].plot(prof["ctrl"].u, zc, "k--", lw = 1, label = "ACCESS ctrl")
 ax4[1].plot(prof["warm"].u, zc, "C2--", lw = 1, label = "ACCESS warm")
@@ -426,11 +425,104 @@ ax4[2].plot(N2_A["ctrl"] .* 1e4, zf, "k--", lw = 1); ax4[2].plot(N2_A["warm"] .*
 ax4[2].plot(S2_A["ctrl"] .* 1e4, zf, "k:", lw = 1);  ax4[2].plot(S2_A["warm"] .* 1e4, zf, "C2:", lw = 1)
 ax4[1].axvline(0, color = "0.6", lw = 0.6); ax4[1].set_xlabel("u (m/s)"); ax4[1].set_title("zonal velocity (dashed: KPP h)")
 ax4[2].set_xlabel("×1e-4 s⁻²"); ax4[2].set_title("N² (solid) and S² (dotted); ACCESS dashed/dotted")
-ax4[3].axvline(0.25, color = "0.6", lw = 0.6); ax4[3].set_xlim(0, 2); ax4[3].set_xlabel("Ri"); ax4[3].set_title("Richardson number (grey: ¼)")
-ax4[4].set_xlim(1e-5, 1e-1); ax4[4].set_xlabel("ν (m²/s)"); ax4[4].set_title("KPP + interior shear ν")
-ax4[1].legend(fontsize = 7); ax4[3].legend(fontsize = 7)
-suptitle(@sprintf("Shear layer above the jet — strat run: ΔS² %+.0f%%, ΔN² %+.0f%%, ΔRi %+.0f%%, Δν %+.0f%%",
-                  100(runs["strat"].sl.S2 / c_sl.S2 - 1), 100(runs["strat"].sl.N2 / c_sl.N2 - 1),
-                  100(runs["strat"].sl.Ri / c_sl.Ri - 1), 100(runs["strat"].sl.ν / c_sl.ν - 1)))
+ax4[3].set_xlim(1e-5, 1e-1); ax4[3].set_xlabel("ν (m²/s)"); ax4[3].set_title("KPP + interior shear ν")
+ax4[1].legend(fontsize = 7)
+suptitle(@sprintf("Shear layer above the jet (jet max → KPP h) — strat: ΔN² %+.0f%%, ΔS² %+.0f%%, Ri %.2f → %.2f, Δν %+.0f%%;  both: ΔN² %+.0f%%, ΔS² %+.0f%%, Ri %.2f → %.2f, Δν %+.0f%%",
+                  100(runs["strat"].sl.N2 / c_sl.N2 - 1), 100(runs["strat"].sl.S2 / c_sl.S2 - 1), c_sl.Ri, runs["strat"].sl.Ri, 100(runs["strat"].sl.ν / c_sl.ν - 1),
+                  100(runs["both"].sl.N2 / c_sl.N2 - 1),  100(runs["both"].sl.S2 / c_sl.S2 - 1),  c_sl.Ri, runs["both"].sl.Ri,  100(runs["both"].sl.ν / c_sl.ν - 1)))
 tight_layout(); savefig(joinpath(FIGDIR, "euc_column_shear_layer.png"), dpi = 150)
 println("saved $(joinpath(FIGDIR, "euc_column_shear_layer.png"))")
+
+# ============================================================================ #
+# 10. Why does the surface current (not) weaken?  Two diagnostics.
+#
+# (a) Shear-layer ladder.  Between the mixed-layer base h and the jet maximum the
+#     velocity climbs from u_h to u_core over a thickness L = h − z_core with mean
+#     shear S̄ = (u_core − u_h)/L; inside the mixed layer it drops by D = u_h − u_surf:
+#         u_surf = u_core − S̄·L − D
+#     so   Δu_surf = Δu_core − L·ΔS̄ − S̄·ΔL − ΔS̄·ΔL − ΔD.
+#     "EUC intrusion" is the −S̄·ΔL term (shoaling thins the layer, ΔL < 0 → eastward);
+#     a sharper pycnocline raises S̄ (Ri held at threshold) → −L·ΔS̄ westward.
+#     Done for the column runs and for the ACCESS profiles (h = density MLD).
+#
+# (b) Mixed-layer momentum budget per run (0 → h):  τ/(ρ₀h) + F_h/h + PGF + adv + Rayleigh,
+#     with F_h = −ν ∂u/∂z at h (eastward when the EUC is below), and its change vs ctrl.
+# ============================================================================ #
+function ladder(U, T, S, h)
+    k_core = argmax(U);  u_core = U[k_core];  z_core = zc[k_core]
+    u_h    = interp1([h], zc, U)[1]
+    L      = h - z_core
+    S̄      = (u_core - u_h) / L
+    N2     = shear_strat(U, T, S)[2]
+    sel    = [i for i in 2:N if zf[i] > z_core && zf[i] < h]
+    N̄2     = isempty(sel) ? NaN : sum(N2[sel]) / length(sel)
+    return (; u_core, z_core, h, u_h, L, S̄, D = u_h - U[end], u_surf = U[end], Ri_eff = N̄2 / S̄^2)
+end
+function ladder_change(a, c)       # a = run, c = control
+    (; du_core = a.u_core - c.u_core, dS = -c.L * (a.S̄ - c.S̄), dL = -c.S̄ * (a.L - c.L),
+       cross = -(a.S̄ - c.S̄) * (a.L - c.L), dD = -(a.D - c.D), du_surf = a.u_surf - c.u_surf)
+end
+
+lad = Dict(k => ladder(runs[k].U, runs[k].T, runs[k].S, runs[k].h_kpp) for k in keys(runs))
+lad_A = Dict(r => ladder(prof[r].u, prof[r].T, prof[r].S, mld_from_profile(prof[r].T, prof[r].S, zc)) for r in ("ctrl", "warm"))
+
+println("\n=== shear-layer ladder: u_surf = u_core − S̄·L − D ===")
+@printf("%-14s %7s %7s %7s %7s %6s %9s %7s %7s %6s\n", "run", "u_core", "z_core", "h", "u_h", "L", "S̄ (1/s)", "D", "u_surf", "Ri_eff")
+for (name, l) in [("ACCESS ctrl", lad_A["ctrl"]), ("ACCESS warm", lad_A["warm"]),
+                  [("column $k", lad[k]) for k in ("ctrl", "peng", "cd", "strat", "stratwc", "both")]...]
+    @printf("%-14s %7.3f %7.1f %7.1f %7.3f %6.1f %9.2e %7.3f %7.3f %6.2f\n",
+            name, l.u_core, l.z_core, l.h, l.u_h, l.L, l.S̄, l.D, l.u_surf, l.Ri_eff)
+end
+println("\nΔu_surf decomposition (cm/s):  Δu_core  −L·ΔS̄ (sharper shear)  −S̄·ΔL (thinner layer = intrusion)  cross  −ΔD (ML shear)  | Δu_surf")
+chg = Dict("ACCESS" => ladder_change(lad_A["warm"], lad_A["ctrl"]))
+for k in ("peng", "cd", "strat", "stratwc", "both"); chg[k] = ladder_change(lad[k], lad["ctrl"]); end
+for name in ("ACCESS", "peng", "cd", "strat", "stratwc", "both")
+    x = chg[name]
+    @printf("%-8s %+7.2f %+7.2f %+7.2f %+7.2f %+7.2f  | %+7.2f   (sum %+7.2f)\n", name,
+            100 * x.du_core, 100 * x.dS, 100 * x.dL, 100 * x.cross, 100 * x.dD, 100 * x.du_surf,
+            100(x.du_core + x.dS + x.dL + x.cross + x.dD))
+end
+
+function ml_budget(r)
+    k_h   = argmin(abs.(zf .- r.h_kpp))                     # face nearest the KPP base
+    cells = k_h:N                                            # cells above that face
+    h     = -zf[k_h]
+    F_h   = -r.νf[k_h] * (r.U[k_h] - r.U[k_h-1]) / Δz        # upward flux of u through h
+    nm(x) = (v = filter(isfinite, x[cells]); sum(v) / length(v))
+    return (; h, stress = r.τx / (constants.ρ₀ * h), base = F_h / h, pgf = nm(r.pgf),
+              adv = nm(r.adv), ray = nm(r.ray), u_ml = nm(r.U))
+end
+mlb = Dict(k => ml_budget(runs[k]) for k in keys(runs))
+println("\n=== column mixed-layer momentum budget (×1e-8 m s⁻², 0 → KPP h) ===")
+@printf("%-8s %6s %8s %8s %8s %8s %8s %8s %8s\n", "run", "h", "τ/ρh", "base F_h/h", "PGF", "adv", "Rayleigh", "sum", "u_ml")
+for k in ("ctrl", "peng", "cd", "strat", "stratwc", "both")
+    b = mlb[k]
+    @printf("%-8s %6.1f %8.1f %10.1f %8.1f %8.1f %8.1f %8.1f %8.3f\n", k, b.h, 1e8 * b.stress, 1e8 * b.base, 1e8 * b.pgf,
+            1e8 * b.adv, 1e8 * b.ray, 1e8 * (b.stress + b.base + b.pgf + b.adv + b.ray), b.u_ml)
+end
+println("changes vs ctrl (×1e-8 m s⁻²); stress term split into Δτ at ctrl h and Δh at ctrl τ:")
+bc = mlb["ctrl"]
+for k in ("peng", "cd", "strat", "stratwc", "both")
+    b = mlb[k]
+    dτ = (runs[k].τx - runs["ctrl"].τx) / (constants.ρ₀ * bc.h)
+    dh = runs["ctrl"].τx / constants.ρ₀ * (1 / b.h - 1 / bc.h)
+    @printf("%-8s Δτ-part %+6.1f  Δh-part %+6.1f  Δbase %+6.1f  ΔPGF %+6.1f  Δadv %+6.1f  ΔRay %+6.1f  | Δu_ml %+.2f cm/s  Δu_surf %+.2f cm/s\n",
+            k, 1e8 * dτ, 1e8 * dh, 1e8 * (b.base - bc.base), 1e8 * (b.pgf - bc.pgf), 1e8 * (b.adv - bc.adv), 1e8 * (b.ray - bc.ray),
+            100(b.u_ml - bc.u_ml), 100(runs[k].jm.u_surf - runs["ctrl"].jm.u_surf))
+end
+
+# figure: ladder decomposition bars
+fig5, ax5 = subplots(figsize = (9, 4))
+names5 = ("ACCESS", "peng", "cd", "strat", "stratwc", "both")
+terms5 = [("Δu_core", :du_core, "C0"), ("−L·ΔS̄ (sharper shear layer)", :dS, "C3"),
+          ("−S̄·ΔL (thinner layer: intrusion)", :dL, "C2"), ("cross", :cross, "0.7"), ("−ΔD (mixed-layer shear)", :dD, "C1")]
+w5 = 0.15
+for (j, (lab, key, col)) in enumerate(terms5)
+    ax5.bar((1:length(names5)) .+ (j - 3) * w5, [100 * getfield(chg[n], key) for n in names5], w5, color = col, label = lab)
+end
+ax5.plot(1:length(names5), [100 * chg[n].du_surf for n in names5], "k_", ms = 18, mew = 2, label = "Δu_surf")
+ax5.set_xticks(1:length(names5)); ax5.set_xticklabels(names5); ax5.axhline(0, color = "0.6", lw = 0.6)
+ax5.set_ylabel("cm/s (+ = eastward)"); ax5.set_title("Δu_surf = Δu_core − L·ΔS̄ − S̄·ΔL − ΔS̄·ΔL − ΔD")
+ax5.legend(fontsize = 7, ncol = 2)
+tight_layout(); savefig(joinpath(FIGDIR, "euc_column_ladder.png"), dpi = 150)
+println("saved $(joinpath(FIGDIR, "euc_column_ladder.png"))")
