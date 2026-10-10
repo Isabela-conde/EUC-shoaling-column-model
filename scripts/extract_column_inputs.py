@@ -7,8 +7,9 @@ Writes euc_column_inputs_140W.nc with, for each run in RUNS:
   tau_x, q_net, sst        : scalars at 140W band mean             [N/m2, W/m2, degC]
 averaged over YEARS[run].
 
-load_vars(base) must return a Dataset with: u, wt, pottemp (or pot_temp), prac_salt (or salt),
-pot_rho_0, sea_level, tau_x, net_sfc_heating.   Longitudes in ACCESS native (-280..80).
+load_vars(base) may return a dict or Dataset holding: u, wt, pottemp|pot_temp, prac_salt|salt,
+potrho|pot_rho_0, sea_level, tau_x, net_sfc_heating.  Longitudes in ACCESS native (-280..80).
+NOTE: if wt was renamed sw_ocean->st_ocean it sits half a cell deep; fine for -w du/dz.
 """
 import numpy as np, xarray as xr
 
@@ -33,22 +34,33 @@ def _band(da, latname, lonname, lon=None, lonslice=None):
         da = da.sel({lonname: slice(nat(lonslice[0]), nat(lonslice[1]))})
     return da
 
+def _get(ds, *names):
+    for n in names:
+        if n in ds:
+            return ds[n]
+    raise KeyError(f"none of {names} in load_vars output")
+
 def column_inputs(ds, years):
-    ds = ds.sel(time=years)
-    pt = ds["pottemp"] if "pottemp" in ds else ds["pot_temp"]
-    sp = ds["prac_salt"] if "prac_salt" in ds else ds["salt"]
+    sel = lambda da: da.sel(time=years)
+    u_, w_   = sel(_get(ds, "u")), sel(_get(ds, "wt"))
+    pt       = sel(_get(ds, "pottemp", "pot_temp"))
+    sp       = sel(_get(ds, "prac_salt", "salt"))
+    rho_     = sel(_get(ds, "potrho", "pot_rho_0"))
+    eta_     = sel(_get(ds, "sea_level"))
+    taux_    = sel(_get(ds, "tau_x"))
+    qnet_    = sel(_get(ds, "net_sfc_heating"))
     if float(pt.isel(time=0).max()) > 100: pt = pt - 273.15
 
-    zt = ds["st_ocean"].sel(st_ocean=slice(0, ZMAX))
+    zt = pt["st_ocean"].sel(st_ocean=slice(0, ZMAX))
     T  = _band(pt, "yt_ocean", "xt_ocean", lon=LON_EVAL).sel(st_ocean=slice(0, ZMAX)).mean("time")
     S  = _band(sp, "yt_ocean", "xt_ocean", lon=LON_EVAL).sel(st_ocean=slice(0, ZMAX)).mean("time")
-    u  = _band(ds["u"], "yu_ocean", "xu_ocean", lon=LON_EVAL).sel(st_ocean=slice(0, ZMAX)).mean("time")
-    w  = _band(ds["wt"], "yt_ocean", "xt_ocean", lon=LON_EVAL).mean("time")        # on sw_ocean
+    u  = _band(u_, "yu_ocean", "xu_ocean", lon=LON_EVAL).sel(st_ocean=slice(0, ZMAX)).mean("time")
+    w  = _band(w_, "yt_ocean", "xt_ocean", lon=LON_EVAL).mean("time")              # may be on sw_ocean
     w  = w.interp(sw_ocean=zt.values).rename({"sw_ocean": "st_ocean"}) if "sw_ocean" in w.dims else w.sel(st_ocean=slice(0, ZMAX))
 
     # ---- pressure gradient force: p/rho0 = g*eta + (g/rho0) * int_z^0 (rho - rho0) dz' --------
-    rho = _band(ds["pot_rho_0"], "yt_ocean", "xt_ocean", lonslice=PGF_LON).sel(st_ocean=slice(0, ZMAX)).mean("time")
-    eta = _band(ds["sea_level"], "yt_ocean", "xt_ocean", lonslice=PGF_LON).mean("time")
+    rho = _band(rho_, "yt_ocean", "xt_ocean", lonslice=PGF_LON).sel(st_ocean=slice(0, ZMAX)).mean("time")
+    eta = _band(eta_, "yt_ocean", "xt_ocean", lonslice=PGF_LON).mean("time")
     if float(rho.max()) < 500: rho = rho + 1000.0                                  # sigma -> rho
     dz  = xr.ones_like(rho["st_ocean"]) * np.gradient(rho["st_ocean"].values)      # layer thickness (approx)
     phyd = (G / RHO0) * ((rho - RHO0) * dz).cumsum("st_ocean") - (G / RHO0) * 0.5 * (rho - RHO0) * dz
@@ -57,8 +69,8 @@ def column_inputs(ds, years):
     slope = np.polyfit(xm, p_over_rho.transpose("st_ocean", "xt_ocean").values.T, 1)[0]   # d(p/rho)/dx per level
     pgf = xr.DataArray(-slope, coords={"st_ocean": p_over_rho["st_ocean"]}, dims="st_ocean")
 
-    tau  = float(_band(ds["tau_x"], "yu_ocean", "xu_ocean", lon=LON_EVAL).mean("time"))
-    qnet = float(_band(ds["net_sfc_heating"], "yt_ocean", "xt_ocean", lon=LON_EVAL).mean("time"))
+    tau  = float(_band(taux_, "yu_ocean", "xu_ocean", lon=LON_EVAL).mean("time"))
+    qnet = float(_band(qnet_, "yt_ocean", "xt_ocean", lon=LON_EVAL).mean("time"))
     sst  = float(T.isel(st_ocean=0))
 
     out = xr.Dataset(dict(T=T, S=S, u=u, w=w, pgf=pgf))
