@@ -19,8 +19,8 @@ PGF_LON  = (210.0, 230.0)             # 150W-130W: fit dp/dx over this span
 LAT      = slice(-2, 2)
 ZMAX     = 500.0
 RHO0, G  = 1026.0, 9.81
-RUNS     = {"ctrl": "era5", "warm": "tas_053"}
-YEARS    = {"ctrl": slice("2008", "2017"), "warm": slice("2008", "2017")}   # last decade of each
+RUNS     = {"ctrl": "era5", "warm": "tas_053", "wind": "uas_015"}   # wind-only run calibrates the stress response
+YEARS    = {k: slice("2008", "2017") for k in ("ctrl", "warm", "wind")}   # last decade of each
 
 nat = lambda x: x - 360 if x > 80 else x
 
