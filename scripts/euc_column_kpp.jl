@@ -7,8 +7,10 @@
 #   strat  : stratification route — warm T, S, SST, w targets; PGF and stress at
 #            control                                            (Saenko et al. 2011)
 #   both   : warm PGF + warm stratification
-# Wind stress is held at the control value in every run (fixed-wind experiments,
-# as in Peng et al.), so the column isolates the ocean's response to warming.
+# Each run's PGF profile is applied with that run's own wind stress: the two are
+# not independent (∫PGF ≈ 1.1 |τ|/ρ₀ in both ACCESS runs), so pairing the warm
+# PGF with the control stress removes the net eastward forcing and collapses
+# the jet. The stress differs by ~11% between runs; it is not analysed further.
 #
 #   dU/dt = PGF(z) - w dU/dz - U/τ_d + d/dz(ν dU/dz),      top flux τ/ρ₀
 #   dT/dt = (T*(z) - T)/τ_T + d/dz(κ dT/dz) + KPP nonlocal,  top flux λ_fb (SST - SST*)/(ρ₀ cp)
@@ -107,9 +109,11 @@ for r in ("ctrl", "warm")
 end
 mkpath(FIGDIR)
 
-τ_ctrl = prof["ctrl"].tau                        # stress held fixed in all runs
 ΔPGF_warm = prof["warm"].pgf .- prof["ctrl"].pgf
-@printf("\nstress held at control: %+.4f N/m²   ∫ΔPGF dz (warm − ctrl): %+.2e m²/s²\n", τ_ctrl, sum(ΔPGF_warm) * Δz)
+@printf("\nstress ctrl %+.4f  warm %+.4f N/m²   ∫PGF/(|τ|/ρ₀): ctrl %.2f  warm %.2f\n",
+        prof["ctrl"].tau, prof["warm"].tau,
+        sum(prof["ctrl"].pgf) * Δz / (abs(prof["ctrl"].tau) / constants.ρ₀),
+        sum(prof["warm"].pgf) * Δz / (abs(prof["warm"].tau) / constants.ρ₀))
 
 # ============================================================================ #
 # 4. Jet metrics (shared by column output and ACCESS profiles)
@@ -162,7 +166,7 @@ end
 # ============================================================================ #
 # 5. One column experiment
 # ============================================================================ #
-function run_column(; pgf_run = "ctrl", strat_run = "ctrl", w_run = nothing,
+function run_column(; pgf_run = "ctrl", strat_run = "ctrl", w_run = nothing, tau_run = nothing,
                       τ_d = τ_d, τ_T = τ_T, use_w = use_w,
                       tfinal = tfinal, verbose = true, label = "")
 
@@ -171,7 +175,7 @@ function run_column(; pgf_run = "ctrl", strat_run = "ctrl", w_run = nothing,
     Ttgt = prof[strat_run].T
     Stgt = prof[strat_run].S
     SST★ = prof[strat_run].sst
-    τx   = τ_ctrl
+    τx   = prof[tau_run === nothing ? pgf_run : tau_run].tau   # stress consistent with the PGF (default)
 
     function forcing_U(m, i)
         f = pgf[i] - m.solution.U[i] / τ_d
@@ -252,10 +256,10 @@ end
 # ============================================================================ #
 # 7. Experiments
 # ============================================================================ #
-println("\n=== experiments (τ_d = $(τ_d / day) d, stress fixed at control) ===")
+println("\n=== experiments (τ_d = $(τ_d / day) d; stress follows the PGF run) ===")
 runs = Dict(
     "ctrl"    => run_column(label = "ctrl"),
-    "pgf"     => run_column(pgf_run = "warm", label = "pgf"),                          # pressure-gradient route
+    "pgf"     => run_column(pgf_run = "warm", label = "pgf"),                          # pressure-gradient route (warm PGF + warm τ)
     "strat"   => run_column(strat_run = "warm", label = "strat"),                      # stratification route
     "both"    => run_column(pgf_run = "warm", strat_run = "warm", label = "both"),     # warm PGF + warm stratification
     "stratwc" => run_column(strat_run = "warm", w_run = "ctrl", label = "stratwc"),    # stratification, control w (check)
@@ -263,9 +267,9 @@ runs = Dict(
 
 order = ("pgf", "strat", "both")
 cols = Dict("ctrl" => "k", "pgf" => "C0", "strat" => "C3", "both" => "C2", "stratwc" => "0.6")
-route_name = Dict("pgf"   => "pressure gradient (warm PGF; ctrl strat.)",
+route_name = Dict("pgf"   => "pressure gradient (warm PGF + τ; ctrl strat.)",
                   "strat" => "stratification (warm T, S, w; ctrl PGF)",
-                  "both"  => "warm PGF + warm stratification",
+                  "both"  => "warm PGF + τ + warm stratification",
                   "stratwc" => "stratification with ctrl w")
 route_short = Dict("pgf" => "pressure\ngradient", "strat" => "stratification", "both" => "PGF +\nstratification")
 
@@ -340,7 +344,7 @@ ax[5].axhline(0, color = "0.6", lw = 0.6)
 ax[5].set_ylabel("Δ centroid depth (m)", color = "C0"); ax5b.set_ylabel("Δ u_surf (cm/s)", color = "C3")
 ax[5].set_title("by route")
 
-suptitle(@sprintf("1-D KPP column at 0°,140°W (τ_d = %.0f d, %.0f d, stress fixed) — Δcentroid: pressure gradient %+.0f, stratification %+.0f, both %+.0f m   (ACCESS %+.0f m)",
+suptitle(@sprintf("1-D KPP column at 0°,140°W (τ_d = %.0f d, %.0f d) — Δcentroid: pressure gradient %+.0f, stratification %+.0f, both %+.0f m   (ACCESS %+.0f m)",
                   τ_d / day, tfinal / day, Δ("pgf"), Δ("strat"), Δ("both"), A_w.centroid - A_c.centroid))
 tight_layout(); savefig(joinpath(FIGDIR, "euc_column_kpp.png"), dpi = 150)
 println("saved $(joinpath(FIGDIR, "euc_column_kpp.png"))")
@@ -481,12 +485,14 @@ for k in ("ctrl", runs_lad...)
     @printf("%-8s %6.1f %8.1f %10.1f %8.1f %8.1f %8.1f %8.1f %8.3f\n", k, b.h, 1e8 * b.stress, 1e8 * b.base, 1e8 * b.pgf,
             1e8 * b.adv, 1e8 * b.ray, 1e8 * (b.stress + b.base + b.pgf + b.adv + b.ray), b.u_ml)
 end
-println("changes vs ctrl (×1e-8 m s⁻²); stress term changes only through h (τ fixed):")
+println("changes vs ctrl (×1e-8 m s⁻²); stress term includes Δτ and Δh:")
 bc = mlb["ctrl"]
 for k in runs_lad
     b = mlb[k]
-    @printf("%-8s Δ(τ/ρh) %+6.1f  Δbase %+6.1f  ΔPGF %+6.1f  Δadv %+6.1f  ΔRay %+6.1f  | Δu_ml %+.2f cm/s  Δu_surf %+.2f cm/s\n",
-            k, 1e8 * (b.stress - bc.stress), 1e8 * (b.base - bc.base), 1e8 * (b.pgf - bc.pgf), 1e8 * (b.adv - bc.adv), 1e8 * (b.ray - bc.ray),
+    dτ = (runs[k].τx - runs["ctrl"].τx) / (constants.ρ₀ * bc.h)
+    dh = runs["ctrl"].τx / constants.ρ₀ * (1 / b.h - 1 / bc.h)
+    @printf("%-8s Δτ-part %+6.1f  Δh-part %+6.1f  Δbase %+6.1f  ΔPGF %+6.1f  Δadv %+6.1f  ΔRay %+6.1f  | Δu_ml %+.2f cm/s  Δu_surf %+.2f cm/s\n",
+            k, 1e8 * dτ, 1e8 * dh, 1e8 * (b.base - bc.base), 1e8 * (b.pgf - bc.pgf), 1e8 * (b.adv - bc.adv), 1e8 * (b.ray - bc.ray),
             100(b.u_ml - bc.u_ml), 100(runs[k].jm.u_surf - runs["ctrl"].jm.u_surf))
 end
 

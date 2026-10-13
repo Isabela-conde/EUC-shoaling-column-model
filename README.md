@@ -4,9 +4,10 @@ Does surface warming shoal the Equatorial Undercurrent by moving the zonal
 pressure gradient (Peng et al. 2022) or through the stratification and the
 mixing in the shear layer above the core (Saenko et al. 2011)? A single-column
 KPP model at 0°, 140°W, forced with ACCESS-OM2 profiles, imposes each change
-separately. Wind stress is held at its control value in every run (fixed-wind
-experiments, as in Peng et al.), so the column isolates the ocean's response
-to warming.
+separately. Each run's pressure-gradient profile is applied together with
+that run's own wind stress, because the two are not independent (the
+depth-integrated PGF balances the stress in both ACCESS runs); the stress
+differs by ~11 % between the runs and is not analysed further.
 
 Companion to the ACCESS-OM2 tropical-warming experiments (control `era5`,
 warming `tas_053`).
@@ -40,8 +41,9 @@ Zonal momentum, temperature and salinity in one vertical column, no rotation
 | ∂z(ν ∂z u) | vertical mixing of momentum | KPP + LMD94 interior shear mixing (below) |
 | (T* − T)/τ_T | restoring of T and S toward the ACCESS profile, τ_T = 20 d | ACCESS profiles; this is how the stratification is imposed |
 
-Boundary conditions: top momentum flux τ_x/ρ₀ with τ_x the **control** stress
-(−0.045 N m⁻²) in all runs; top heat flux λ_fb (SST − SST*)/(ρ₀ c_p) with
+Boundary conditions: top momentum flux τ_x/ρ₀ with τ_x the stress of the run
+whose PGF is imposed (−0.045 N m⁻² control, −0.040 warm; pairing the warm PGF
+with the control stress removes the net eastward forcing and collapses the jet); top heat flux λ_fb (SST − SST*)/(ρ₀ c_p) with
 λ_fb = 40 W m⁻² K⁻¹ and SST* the ACCESS SST of the run whose stratification is
 imposed; zero flux at the bottom (400 m). No restoring on u anywhere.
 
@@ -92,9 +94,7 @@ Runs required: `ctrl` and `warm`; any others in the file are ignored.
 
 ## Experiments
 
-All at control stress.
-
-| run | PGF(z) | T*, S*, SST*, w | isolates |
+| run | PGF(z) and τ | T*, S*, SST*, w | isolates |
 |---|---|---|---|
 | `ctrl` | control | control | baseline; compare with the ACCESS control jet |
 | `pgf` | warm | control | pressure-gradient route (Peng) |
@@ -150,7 +150,10 @@ changes; ladder table and decomposition; mixed-layer budget and its changes.
   changed with everything else fixed, which no ACCESS diagnostic can.
 - It is a frictional jet: with PGF balanced by Rayleigh drag and mixing, the
   core speed responds linearly to a PGF change, whereas the real jet is
-  inertial (U ∝ (τg′L)^¼). Amplitude changes are therefore overstated.
+  inertial (U ∝ (τg′L)^¼). ACCESS moves the jet ~10 m with the core speed
+  unchanged; the column moves it about as far but loses ~0.06 m/s off the
+  core and more off the lower jet. The column is used for *where* the jet
+  goes and what the shear layer does, not for the jet's amplitude.
 - Restoring at 20 d does not hold the ACCESS pycnocline against the column's
   own mixing: the N² peak at the core top is sharper than in ACCESS, so the
   shear layer can hold more velocity drop. Fractional changes in N² and S²
